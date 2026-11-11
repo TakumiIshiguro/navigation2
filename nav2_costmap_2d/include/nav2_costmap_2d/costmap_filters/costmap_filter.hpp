@@ -122,7 +122,7 @@ public:
   /**
    * @brief Reset the layer
    */
-  void reset() final;
+  void reset() override;
 
   /**
    * @brief If clearing operations should be processed on this layer or not

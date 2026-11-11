@@ -15,6 +15,7 @@
 #ifndef NAV2_COLLISION_MONITOR__POLYGON_HPP_
 #define NAV2_COLLISION_MONITOR__POLYGON_HPP_
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/polygon_stamped.hpp"
 #include "geometry_msgs/msg/polygon.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
@@ -176,6 +178,13 @@ protected:
 
   bool isPointInside(const Point & point) const;
 
+  /**
+   * @brief Callback for the enabled_topic: switches the polygon on/off
+   * (e.g. driven by the costmap BinaryFilter binary state)
+   * @param msg Incoming binary state
+   */
+  void enabledCallback(std_msgs::msg::Bool::ConstSharedPtr msg);
+
   // ----- Variables -----
 
   /// @brief Collision Monitor node
@@ -201,7 +210,12 @@ protected:
   /// @brief Footprint subscriber
   std::unique_ptr<nav2_costmap_2d::FootprintSubscriber> footprint_sub_;
   /// @brief Whether polygon is enabled
-  bool enabled_;
+  std::atomic<bool> enabled_{true};
+  /// @brief Topic (std_msgs/Bool) to switch the polygon on/off
+  /// (true: enabled, false: disabled). Empty: not used
+  std::string enabled_topic_;
+  /// @brief Subscription to enabled_topic
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enabled_sub_;
 
   // Global variables
   /// @brief TF buffer

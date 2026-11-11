@@ -83,6 +83,17 @@ bool Polygon::configure()
       polygon_pub_topic, polygon_qos);
   }
 
+  if (!enabled_topic_.empty()) {
+    // Transient local: get the latest state even if the publisher
+    // (e.g. BinaryFilter, which publishes only on state change) started earlier.
+    enabled_sub_ = node->create_subscription<std_msgs::msg::Bool>(
+      enabled_topic_, rclcpp::QoS(1).transient_local().reliable(),
+      std::bind(&Polygon::enabledCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(
+      logger_, "[%s]: Polygon is enabled while %s topic is true",
+      polygon_name_.c_str(), enabled_topic_.c_str());
+  }
+
   // Add callback for dynamic parameters
   dyn_params_handler_ = node->add_on_set_parameters_callback(
     std::bind(&Polygon::dynamicParametersCallback, this, std::placeholders::_1));
@@ -259,6 +270,10 @@ bool Polygon::getCommonParameters(std::string & polygon_pub_topic)
     enabled_ = node->get_parameter(polygon_name_ + ".enabled").as_bool();
 
     nav2_util::declare_parameter_if_not_declared(
+      node, polygon_name_ + ".enabled_topic", rclcpp::ParameterValue(std::string("")));
+    enabled_topic_ = node->get_parameter(polygon_name_ + ".enabled_topic").as_string();
+
+    nav2_util::declare_parameter_if_not_declared(
       node, polygon_name_ + ".max_points", rclcpp::ParameterValue(3));
     max_points_ = node->get_parameter(polygon_name_ + ".max_points").as_int();
 
@@ -382,6 +397,16 @@ Polygon::dynamicParametersCallback(
   }
   result.successful = true;
   return result;
+}
+
+void Polygon::enabledCallback(std_msgs::msg::Bool::ConstSharedPtr msg)
+{
+  const bool enabled = msg->data;
+  if (enabled_.exchange(enabled) != enabled) {
+    RCLCPP_INFO(
+      logger_, "[%s]: Polygon %s by %s topic",
+      polygon_name_.c_str(), enabled ? "enabled" : "disabled", enabled_topic_.c_str());
+  }
 }
 
 inline bool Polygon::isPointInside(const Point & point) const

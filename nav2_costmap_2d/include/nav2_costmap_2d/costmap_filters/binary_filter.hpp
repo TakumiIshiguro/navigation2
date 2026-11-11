@@ -43,6 +43,7 @@
 
 #include "nav2_costmap_2d/costmap_filters/costmap_filter.hpp"
 
+#include "geometry_msgs/msg/twist.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "nav2_msgs/msg/costmap_filter_info.hpp"
 
@@ -82,6 +83,13 @@ public:
   void resetFilter();
 
   /**
+   * @brief Costmap reset (e.g. clear_entirely_* service called by recoveries).
+   * Binary state, mask and subscriptions are kept as they are: the mask does not change
+   * on costmap clearing, and resetting would flip the state to default for a moment.
+   */
+  void reset() override;
+
+  /**
    * @brief If this filter is active
    */
   bool isActive();
@@ -100,6 +108,30 @@ private:
    * @param state New binary state
    */
   void changeState(const bool state);
+  /**
+   * @brief Publishes the binary state: default state while escaping, binary_state_ otherwise
+   */
+  void publishState();
+
+  // ----- Escape -----
+  // While the robot is in the mask area (non-default state), a static obstacle may block
+  // the robot forever (e.g. obstacle layers are off and collision monitor stop zone is on).
+  // Escape: publish default state for a while, so that the robot can avoid the obstacle.
+  // Started when velocity is requested but the robot does not move for escape_stuck_time.
+
+  /**
+   * @brief Checks stuck condition and escape end. Called from process() with mutex locked.
+   */
+  void updateEscape(const geometry_msgs::msg::Pose2D & pose);
+  /**
+   * @brief Starts escape. Must be called with mutex locked.
+   */
+  void startEscape(
+    const geometry_msgs::msg::Pose2D & pose, const rclcpp::Time & now, const std::string & reason);
+  /**
+   * @brief Callback for the velocity command used for stuck detection
+   */
+  void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
 
   // Working with filter info and mask
   rclcpp::Subscription<nav2_msgs::msg::CostmapFilterInfo>::SharedPtr filter_info_sub_;
@@ -118,7 +150,23 @@ private:
   double flip_threshold_;
 
   bool default_state_;  // Default Binary Filter state
-  bool binary_state_;  // Current Binary Filter state
+  bool binary_state_;  // Current Binary Filter state (by mask)
+
+  // Escape
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+  double escape_stuck_time_;  // <= 0: automatic escape disabled
+  double escape_distance_;
+  double escape_timeout_;
+  bool escaping_;
+  rclcpp::Time escape_start_time_;
+  geometry_msgs::msg::Pose2D escape_start_pose_;
+  // Stuck detection
+  bool cmd_requested_;
+  rclcpp::Time last_cmd_time_;
+  bool stuck_anchor_valid_;
+  geometry_msgs::msg::Pose2D stuck_anchor_;  // pose where the robot started to stay
+  rclcpp::Time last_stuck_check_;
+  double stuck_accum_;  // time with velocity requested but robot not moving
 };
 
 }  // namespace nav2_costmap_2d

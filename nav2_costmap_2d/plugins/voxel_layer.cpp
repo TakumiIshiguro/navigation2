@@ -151,6 +151,7 @@ void VoxelLayer::updateBounds(
     updateOrigin(robot_x - getSizeInMetersX() / 2, robot_y - getSizeInMetersY() / 2);
   }
   if (!enabled_) {
+    clearOnDisable(min_x, min_y, max_x, max_y);
     return;
   }
   useExtraBounds(min_x, min_y, max_x, max_y);
@@ -502,8 +503,7 @@ VoxelLayer::dynamicParametersCallback(
       }
     } else if (param_type == ParameterType::PARAMETER_BOOL) {
       if (param_name == name_ + "." + "enabled") {
-        enabled_ = parameter.as_bool();
-        current_ = false;
+        setEnabled(parameter.as_bool());
       } else if (param_name == name_ + "." + "footprint_clearing_enabled") {
         footprint_clearing_enabled_ = parameter.as_bool();
       } else if (param_name == name_ + "." + "publish_voxel_map") {

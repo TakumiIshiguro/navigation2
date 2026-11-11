@@ -53,6 +53,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/point_cloud.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "nav2_costmap_2d/costmap_layer.hpp"
 #include "nav2_costmap_2d/layered_costmap.hpp"
 #include "nav2_costmap_2d/observation_buffer.hpp"
@@ -213,6 +214,33 @@ protected:
     double * min_x, double * min_y,
     double * max_x,
     double * max_y);
+
+  /**
+   * @brief Switch the layer on/off. Must be called with the layer mutex locked.
+   * Disabling schedules a full clear of the layer, so that already marked
+   * obstacles do not remain in the master costmap.
+   */
+  void setEnabled(const bool enabled);
+
+  /**
+   * @brief Callback for the enabled_topic (e.g. BinaryFilter binary state):
+   * true disables the layer, false enables it
+   */
+  void enabledCallback(std_msgs::msg::Bool::ConstSharedPtr msg);
+
+  /**
+   * @brief If the layer was just disabled, clear it and expand bounds to the whole layer,
+   * so that the master costmap gets reset. Must be called with the layer mutex locked.
+   */
+  void clearOnDisable(double * min_x, double * min_y, double * max_x, double * max_y);
+
+  /// @brief Topic (std_msgs/Bool) to switch the layer off
+  /// (true: disabled, e.g. BinaryFilter state; false: enabled). Empty: not used
+  std::string enabled_topic_;
+  /// @brief Subscription to enabled_topic
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enabled_sub_;
+  /// @brief Layer was disabled and is to be cleared on the next update
+  bool need_clear_on_disable_{false};
 
   std::vector<geometry_msgs::msg::Point> transformed_footprint_;
   bool footprint_clearing_enabled_;

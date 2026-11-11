@@ -77,6 +77,7 @@ void ObstacleLayer::onInitialize()
   std::string topics_string;
 
   declareParameter("enabled", rclcpp::ParameterValue(true));
+  declareParameter("enabled_topic", rclcpp::ParameterValue(std::string("")));
   declareParameter("footprint_clearing_enabled", rclcpp::ParameterValue(true));
   declareParameter("min_obstacle_height", rclcpp::ParameterValue(0.0));
   declareParameter("max_obstacle_height", rclcpp::ParameterValue(2.0));
@@ -89,6 +90,7 @@ void ObstacleLayer::onInitialize()
   }
 
   node->get_parameter(name_ + "." + "enabled", enabled_);
+  node->get_parameter(name_ + "." + "enabled_topic", enabled_topic_);
   node->get_parameter(name_ + "." + "footprint_clearing_enabled", footprint_clearing_enabled_);
   node->get_parameter(name_ + "." + "min_obstacle_height", min_obstacle_height_);
   node->get_parameter(name_ + "." + "max_obstacle_height", max_obstacle_height_);
@@ -102,6 +104,19 @@ void ObstacleLayer::onInitialize()
       &ObstacleLayer::dynamicParametersCallback,
       this,
       std::placeholders::_1));
+
+  if (!enabled_topic_.empty()) {
+    rclcpp::SubscriptionOptions enabled_sub_opt;
+    enabled_sub_opt.callback_group = callback_group_;
+    // Transient local: BinaryFilter publishes its state only on change
+    enabled_sub_ = node->create_subscription<std_msgs::msg::Bool>(
+      enabled_topic_, rclcpp::QoS(1).transient_local().reliable(),
+      std::bind(&ObstacleLayer::enabledCallback, this, std::placeholders::_1),
+      enabled_sub_opt);
+    RCLCPP_INFO(
+      logger_, "%s is disabled while %s topic is true",
+      name_.c_str(), enabled_topic_.c_str());
+  }
 
   RCLCPP_INFO(
     logger_,
@@ -304,11 +319,8 @@ ObstacleLayer::dynamicParametersCallback(
         max_obstacle_height_ = parameter.as_double();
       }
     } else if (param_type == ParameterType::PARAMETER_BOOL) {
-      if (param_name == name_ + "." + "enabled" && enabled_ != parameter.as_bool()) {
-        enabled_ = parameter.as_bool();
-        if (enabled_) {
-          current_ = false;
-        }
+      if (param_name == name_ + "." + "enabled") {
+        setEnabled(parameter.as_bool());
       } else if (param_name == name_ + "." + "footprint_clearing_enabled") {
         footprint_clearing_enabled_ = parameter.as_bool();
       }
@@ -421,6 +433,7 @@ ObstacleLayer::updateBounds(
     updateOrigin(robot_x - getSizeInMetersX() / 2, robot_y - getSizeInMetersY() / 2);
   }
   if (!enabled_) {
+    clearOnDisable(min_x, min_y, max_x, max_y);
     return;
   }
   useExtraBounds(min_x, min_y, max_x, max_y);
@@ -709,6 +722,46 @@ ObstacleLayer::raytraceFreespace(
       clearing_observation.raytrace_min_range_, min_x, min_y, max_x,
       max_y);
   }
+}
+
+void
+ObstacleLayer::setEnabled(const bool enabled)
+{
+  if (enabled_ == enabled) {
+    return;
+  }
+  enabled_ = enabled;
+  if (enabled_) {
+    // Wait for fresh observations before reporting the layer as current
+    current_ = false;
+    need_clear_on_disable_ = false;
+  } else {
+    need_clear_on_disable_ = true;
+  }
+  RCLCPP_INFO(logger_, "%s: %s", name_.c_str(), enabled_ ? "Enabled" : "Disabled");
+}
+
+void
+ObstacleLayer::enabledCallback(std_msgs::msg::Bool::ConstSharedPtr msg)
+{
+  std::lock_guard<Costmap2D::mutex_t> guard(*getMutex());
+  // true (e.g. robot inside BinaryFilter mask): layer off
+  setEnabled(!msg->data);
+}
+
+void
+ObstacleLayer::clearOnDisable(double * min_x, double * min_y, double * max_x, double * max_y)
+{
+  if (!need_clear_on_disable_) {
+    return;
+  }
+  need_clear_on_disable_ = false;
+  resetMaps();
+  // Touch whole layer area: master costmap will be reset there and re-inflated
+  touch(getOriginX(), getOriginY(), min_x, min_y, max_x, max_y);
+  touch(
+    getOriginX() + getSizeInMetersX(), getOriginY() + getSizeInMetersY(),
+    min_x, min_y, max_x, max_y);
 }
 
 void
