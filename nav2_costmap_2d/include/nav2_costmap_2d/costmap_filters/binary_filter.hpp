@@ -117,7 +117,9 @@ private:
   // While the robot is in the mask area (non-default state), a static obstacle may block
   // the robot forever (e.g. obstacle layers are off and collision monitor stop zone is on).
   // Escape: publish default state for a while, so that the robot can avoid the obstacle.
-  // Started when velocity is requested but the robot does not move for escape_stuck_time.
+  // Started when the robot is blocked for escape_stuck_time: velocity is requested on the
+  // collision monitor input, but its output is zero (or no longer published).
+  // Robot pose is not used for this, so odometry drift does not affect it.
 
   /**
    * @brief Checks stuck condition and escape end. Called from process() with mutex locked.
@@ -129,9 +131,13 @@ private:
   void startEscape(
     const geometry_msgs::msg::Pose2D & pose, const rclcpp::Time & now, const std::string & reason);
   /**
-   * @brief Callback for the velocity command used for stuck detection
+   * @brief Callback for the requested velocity (collision monitor input)
    */
   void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
+  /**
+   * @brief Callback for the output velocity (collision monitor output)
+   */
+  void cmdVelOutCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
 
   // Working with filter info and mask
   rclcpp::Subscription<nav2_msgs::msg::CostmapFilterInfo>::SharedPtr filter_info_sub_;
@@ -154,19 +160,21 @@ private:
 
   // Escape
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_out_sub_;
   double escape_stuck_time_;  // <= 0: automatic escape disabled
   double escape_distance_;
   double escape_timeout_;
   bool escaping_;
   rclcpp::Time escape_start_time_;
   geometry_msgs::msg::Pose2D escape_start_pose_;
-  // Stuck detection
-  bool cmd_requested_;
+  // Stuck (blocked) detection
+  bool cmd_requested_;  // input velocity is non-zero
   rclcpp::Time last_cmd_time_;
-  bool stuck_anchor_valid_;
-  geometry_msgs::msg::Pose2D stuck_anchor_;  // pose where the robot started to stay
+  bool cmd_out_moving_;  // output velocity is non-zero
+  rclcpp::Time last_cmd_out_time_;
+  bool stuck_check_valid_;  // last_stuck_check_ is valid
   rclcpp::Time last_stuck_check_;
-  double stuck_accum_;  // time with velocity requested but robot not moving
+  double stuck_accum_;  // time with velocity requested but not passed to the robot
 };
 
 }  // namespace nav2_costmap_2d

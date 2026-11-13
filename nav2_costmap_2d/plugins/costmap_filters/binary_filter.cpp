@@ -53,21 +53,21 @@ BinaryFilter::BinaryFilter()
 : filter_info_sub_(nullptr), mask_sub_(nullptr),
   binary_state_pub_(nullptr), filter_mask_(nullptr), mask_frame_(""), global_frame_(""),
   default_state_(false), binary_state_(default_state_),
-  cmd_vel_sub_(nullptr),
+  cmd_vel_sub_(nullptr), cmd_vel_out_sub_(nullptr),
   escape_stuck_time_(0.0), escape_distance_(2.0), escape_timeout_(60.0),
   escaping_(false),
-  cmd_requested_(false), stuck_anchor_valid_(false), stuck_accum_(0.0)
+  cmd_requested_(false), cmd_out_moving_(false), stuck_check_valid_(false), stuck_accum_(0.0)
 {
 }
 
 namespace
 {
-// Robot is regarded as not moving while it stays within these from the anchor pose
-constexpr double kStuckStillDistance = 0.05;  // [m]
-constexpr double kStuckStillAngle = 0.1;  // [rad]
-// Velocity is regarded as requested above these
+// Input velocity is regarded as requested above these
 constexpr double kCmdLinearThreshold = 0.05;  // [m/s]
 constexpr double kCmdAngularThreshold = 0.1;  // [rad/s]
+// Output velocity is regarded as passed (not stopped) above this.
+// Small, so that a slowed down velocity is still regarded as passed.
+constexpr double kCmdOutEpsilon = 1e-3;
 // Velocity command older than this is ignored
 constexpr double kCmdTimeout = 1.0;  // [s]
 }  // namespace
@@ -91,10 +91,13 @@ void BinaryFilter::initializeFilter(
   declareParameter("flip_threshold", rclcpp::ParameterValue(50.0));
   node->get_parameter(name_ + "." + "flip_threshold", flip_threshold_);
   std::string escape_cmd_vel_topic;
+  std::string escape_cmd_vel_out_topic;
   declareParameter("escape_stuck_time", rclcpp::ParameterValue(0.0));
   node->get_parameter(name_ + "." + "escape_stuck_time", escape_stuck_time_);
   declareParameter("escape_cmd_vel_topic", rclcpp::ParameterValue("cmd_vel"));
   node->get_parameter(name_ + "." + "escape_cmd_vel_topic", escape_cmd_vel_topic);
+  declareParameter("escape_cmd_vel_out_topic", rclcpp::ParameterValue("cmd_vel"));
+  node->get_parameter(name_ + "." + "escape_cmd_vel_out_topic", escape_cmd_vel_out_topic);
   declareParameter("escape_distance", rclcpp::ParameterValue(2.0));
   node->get_parameter(name_ + "." + "escape_distance", escape_distance_);
   declareParameter("escape_timeout", rclcpp::ParameterValue(60.0));
@@ -122,18 +125,23 @@ void BinaryFilter::initializeFilter(
 
   // Escape
   escaping_ = false;
-  stuck_anchor_valid_ = false;
+  stuck_check_valid_ = false;
   stuck_accum_ = 0.0;
   cmd_requested_ = false;
+  cmd_out_moving_ = false;
   if (escape_stuck_time_ > 0.0) {
     cmd_vel_sub_ = node->create_subscription<geometry_msgs::msg::Twist>(
       escape_cmd_vel_topic, rclcpp::QoS(10),
       std::bind(&BinaryFilter::cmdVelCallback, this, std::placeholders::_1));
+    cmd_vel_out_sub_ = node->create_subscription<geometry_msgs::msg::Twist>(
+      escape_cmd_vel_out_topic, rclcpp::QoS(10),
+      std::bind(&BinaryFilter::cmdVelOutCallback, this, std::placeholders::_1));
     RCLCPP_INFO(
       logger_,
-      "BinaryFilter: Escape when stuck for %.1f s (velocity requested on %s), "
-      "until moved %.1f m / %.0f s",
-      escape_stuck_time_, escape_cmd_vel_topic.c_str(), escape_distance_, escape_timeout_);
+      "BinaryFilter: Escape when blocked for %.1f s (velocity requested on %s but not passed "
+      "to %s), until moved %.1f m / %.0f s",
+      escape_stuck_time_, escape_cmd_vel_topic.c_str(), escape_cmd_vel_out_topic.c_str(),
+      escape_distance_, escape_timeout_);
   }
 
   // Reset parameters
@@ -285,6 +293,7 @@ void BinaryFilter::resetFilter()
   filter_info_sub_.reset();
   mask_sub_.reset();
   cmd_vel_sub_.reset();
+  cmd_vel_out_sub_.reset();
   escaping_ = false;
   if (binary_state_pub_) {
     binary_state_pub_->on_deactivate();
@@ -334,16 +343,16 @@ void BinaryFilter::updateEscape(const geometry_msgs::msg::Pose2D & pose)
     const double moved =
       std::hypot(pose.x - escape_start_pose_.x, pose.y - escape_start_pose_.y);
     std::string reason;
-    if (binary_state_ == default_state_) {
-      reason = "robot left the mask area";
-    } else if (moved >= escape_distance_) {
+    // Leaving the mask area does not finish the escape: if the robot re-entered the area next
+    // to the obstacle, the obstacle layers would be switched off before it has been passed.
+    if (moved >= escape_distance_) {
       reason = "moved " + std::to_string(moved) + " m";
     } else if ((now - escape_start_time_).seconds() >= escape_timeout_) {
       reason = "timeout";
     }
     if (!reason.empty()) {
       escaping_ = false;
-      stuck_anchor_valid_ = false;
+      stuck_check_valid_ = false;
       stuck_accum_ = 0.0;
       RCLCPP_INFO(
         logger_, "BinaryFilter: Escape finished (%s). Following the mask again.", reason.c_str());
@@ -353,33 +362,28 @@ void BinaryFilter::updateEscape(const geometry_msgs::msg::Pose2D & pose)
   }
 
   if (escape_stuck_time_ <= 0.0 || binary_state_ == default_state_) {
-    stuck_anchor_valid_ = false;
+    stuck_check_valid_ = false;
     stuck_accum_ = 0.0;
     return;
   }
 
-  // Robot moved: reset stuck detection
-  const double dyaw = std::fabs(
-    std::atan2(std::sin(pose.theta - stuck_anchor_.theta), std::cos(pose.theta - stuck_anchor_.theta)));
-  if (!stuck_anchor_valid_ ||
-    std::hypot(pose.x - stuck_anchor_.x, pose.y - stuck_anchor_.y) > kStuckStillDistance ||
-    dyaw > kStuckStillAngle)
-  {
-    stuck_anchor_ = pose;
-    stuck_anchor_valid_ = true;
-    stuck_accum_ = 0.0;
-    last_stuck_check_ = now;
-    return;
-  }
-
-  // Count only while velocity is requested (e.g. not while waiting in recoveries)
-  const double dt = std::max(0.0, (now - last_stuck_check_).seconds());
+  const double dt =
+    stuck_check_valid_ ? std::max(0.0, (now - last_stuck_check_).seconds()) : 0.0;
   last_stuck_check_ = now;
+  stuck_check_valid_ = true;
+
+  // Velocity is passed to the robot (not stopped by the collision monitor): not blocked
+  if (cmd_out_moving_ && (now - last_cmd_out_time_).seconds() <= kCmdTimeout) {
+    stuck_accum_ = 0.0;
+    return;
+  }
+  // Blocked: velocity is requested, but the output is zero or no longer published.
+  // While nothing is requested (e.g. waiting in recoveries or at a stop waypoint), only pause.
   if (cmd_requested_ && (now - last_cmd_time_).seconds() <= kCmdTimeout) {
     stuck_accum_ += dt;
   }
   if (stuck_accum_ >= escape_stuck_time_) {
-    startEscape(pose, now, "stuck for " + std::to_string(stuck_accum_) + " s");
+    startEscape(pose, now, "blocked for " + std::to_string(stuck_accum_) + " s");
   }
 }
 
@@ -389,12 +393,12 @@ void BinaryFilter::startEscape(
   escaping_ = true;
   escape_start_time_ = now;
   escape_start_pose_ = pose;
-  stuck_anchor_valid_ = false;
+  stuck_check_valid_ = false;
   stuck_accum_ = 0.0;
   RCLCPP_WARN(
     logger_,
     "BinaryFilter: Escape started (%s): publishing default state until moved %.1f m, "
-    "%.0f s passed or robot left the mask area",
+    "or %.0f s passed",
     reason.c_str(), escape_distance_, escape_timeout_);
   publishState();
 }
@@ -407,6 +411,16 @@ void BinaryFilter::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg
     std::fabs(msg->linear.y) > kCmdLinearThreshold ||
     std::fabs(msg->angular.z) > kCmdAngularThreshold;
   last_cmd_time_ = clock_->now();
+}
+
+void BinaryFilter::cmdVelOutCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
+{
+  std::lock_guard<CostmapFilter::mutex_t> guard(*getMutex());
+  cmd_out_moving_ =
+    std::fabs(msg->linear.x) > kCmdOutEpsilon ||
+    std::fabs(msg->linear.y) > kCmdOutEpsilon ||
+    std::fabs(msg->angular.z) > kCmdOutEpsilon;
+  last_cmd_out_time_ = clock_->now();
 }
 
 }  // namespace nav2_costmap_2d
