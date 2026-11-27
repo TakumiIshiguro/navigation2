@@ -228,6 +228,11 @@
       <input_port name="battery_topic">Topic for battery info</input_port>
     </Condition>
 
+    <Condition ID="IsBinaryStateInactive">
+      <input_port name="binary_state_topic">BinaryFilter state topic</input_port>
+      <input_port name="min_inactive_time">Time [s] the state must stay false</input_port>
+    </Condition>
+
     <Condition ID="DistanceTraveled">
       <input_port name="distance">Distance to check if passed</input_port>
       <input_port name="global_frame">reference frame to check in</input_port>
